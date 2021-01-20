@@ -1,0 +1,28 @@
+{
+  "description": "Function test tool",
+  "manifest_version": 2,
+  "name": "Function Test Tool",
+  "version": "1.0",
+  
+  "background": {
+    "scripts": [
+      "bg/reduxactions.js",
+      "bg/attachtodebugger.js",
+      "bg/record.js",
+      "background.js"]
+  },
+  
+  "permissions": [
+      "<all_urls>", "activeTab", "tabs", "debugger"
+  ],
+  
+  "devtools_page": "page/devtools-page.html",
+
+  "content_scripts": [
+    {
+      "matches": ["*://*.com/*"],
+      "js": ["contentScript.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

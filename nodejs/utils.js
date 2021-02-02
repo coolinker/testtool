@@ -3,7 +3,7 @@ const colors = require('colors/safe');
 const deltaConsole = require('jsondiffpatch').console;
 const jsondiffpatch = require('jsondiffpatch').create();
 const jsondiffpatchFilter = require('jsondiffpatch').create({
-    propertyFilter: jsonDiffPropertyFilter
+    // propertyFilter: jsonDiffPropertyFilter
   });
 
 function requestToObj(request) {
@@ -17,7 +17,13 @@ function requestToObj(request) {
 }
   
 function filterHeaders(headers) {
-    delete headers["user-agent"];
+    const contentType = headers["content-type"];
+    if (contentType?.indexOf("image") > -1) {
+        return {"content-type": contentType};
+    } else {
+        delete headers["user-agent"];
+    }
+
     return headers;
 }
 
@@ -27,11 +33,17 @@ async function getResponseBody(response) {
     if (status === 302) return "";
 
     const contentType = headers["content-type"];
-    if (contentType.indexOf("image") > -1) {
+    if (contentType?.indexOf("image") > -1) {
         return (await response.buffer()).toString('base64');
     }
 
-    return await response.text();
+    const txt = await response.text();
+    if (txt == "") {
+        console.log("response.request()", response.request().url());
+        const base64 = (await response.buffer()).toString('base64');
+        console.log(base64);
+    }
+    return txt;
 }
 
 function generateStateDelta(target, source, useFilter = true) {
@@ -74,10 +86,21 @@ function jsonDiffPropertyFilter(name, context) {
     return true;
 }
 
+function domMutationSummary(domMutation) {
+    return domMutation.map(m => {
+        return {
+            ...m,
+            target: m.target.substring(0, 100),
+        }
+    })
+}
+
 module.exports = {
     requestToObj,
     getResponseBody,
     generateStateDelta,
     deltaConsole,
     jsondiffpatchFilter,
+    filterHeaders,
+    domMutationSummary,
 };

@@ -3,35 +3,46 @@
 const _port = chrome.runtime.connect({name: "ftt_devtool_panel_" + chrome.devtools.inspectedWindow.tabId});
 _port.onMessage.addListener(handleMessage);
 let __FTT_PLAY_STARTED__ = false;
-
+let messages = [];
+let renderTimeoutObj;
 function handleMessage(request) {
-  console.log("devtool panel handleMessage", request);
   if (request.type === "LAUNCH") {
     document.getElementById("actionList").innerHTML = "";
     return;
   }
-  
-  const newDiv = document.createElement("div");
-  const { time, source, type, message}  = request;
 
-
-  newDiv.innerHTML = `<div class="ftt-time">${time}</div>
-  <div class="ftt-type">${type}</div>
-  <div class="ftt-source">${source}</div>
-  <div class="ftt-message">${JSON.stringify(message.url || message.action || message).substr(0, 1000)}</div>`;
-  newDiv.className = "ftt-line";
+  messages.push(request)
+  clearTimeout(renderTimeoutObj);
+  renderTimeoutObj = setTimeout(render, 200);
   //const newContent = document.createTextNode(request.time + ": " + JSON.stringify(request));
   //newDiv.appendChild(newContent);
 
-  document.getElementById("actionList").appendChild(newDiv);
 }
+
+function render() {
+  messages.sort((m, m1) => m.time - m1.time);
+  const list = document.getElementById("actionList");
+  list.innerHTML = "";
+  for(let i=0; i<messages.length; i++) {
+    const newDiv = document.createElement("div");
+    const { time, source, type, message}  = messages[i];
+    newDiv.innerHTML = `<div class="ftt-time">${time}</div>
+    <div class="ftt-type">${type}</div>
+    <div class="ftt-source">${source}</div>
+    <div class="ftt-message">${JSON.stringify(message.url || (message.action && message.action.type) || message).substr(0, 200)}</div>`;
+    newDiv.className = "ftt-line";
+    list.appendChild(newDiv);
+  }
+}
+
 
 document.getElementById("button_start").addEventListener("click", () => {
   document.getElementById("actionList").innerHTML = "";
+  messages.length = 0;
   postMessage({
     type: "RECORD"
   });
-  setTimeout(() => chrome.devtools.inspectedWindow.reload({ignoreCache: true}), 1000);
+  setTimeout(() => chrome.devtools.inspectedWindow.reload({ignoreCache: true}), 200);
 });
 
 document.getElementById("button_export").addEventListener("click", () => {

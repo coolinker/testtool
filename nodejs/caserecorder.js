@@ -1,9 +1,10 @@
 const puppeteer = require("puppeteer-core");
 const hash = require('object-hash');
+const colors = require('colors/safe');
 
 const injectContentScript = require("./injectscript");
 const saveRecords = require("./saverecord");
-const { requestToObj, getResponseBody  } = require("./utils");
+const { requestToObj, getResponseBody, filterHeaders } = require("./utils");
 
 const officeUrlRegex = /^https?:\/\/([a-zA-Z\d-]+\.){0,}office\./;
 const REDUX_ACTIONS = [];
@@ -13,7 +14,8 @@ const RESPONSES = [];
 const REQUESTS = [];
 
 const httpMap = {};
-
+const caseName = "Case1";
+const startPage = "https://forms.office.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbR0oaxTShh7lDuDtmCzJnyRZUNlU3R044MlQ4SDlWV0FWNlNOQ09ISDdOTi4u&light=1";
 let recordingStarted = false;
 
 (async () => {
@@ -36,8 +38,12 @@ let recordingStarted = false;
 
   page.on('request', (request) => {
     const url = request.url();
-    if (officeUrlRegex.test(url)) {
-      console.log(request.url(), request.headers())
+    if (url === startPage) {
+      recordingStarted = true;
+    }
+
+    if (true || officeUrlRegex.test(url)) {
+      console.log(colors.red("recordingStarted"), recordingStarted, request.url(), request.headers())
       const msg = {
         type: "REQUEST",
         source: "ftt_node",
@@ -57,8 +63,8 @@ let recordingStarted = false;
     const url = response.request().url();
     const status = response.status();
     const responseTime = Date.now();
-    if (officeUrlRegex.test(url)) {
-      const headers = response.headers();
+    if (true || officeUrlRegex.test(url)) {
+      const headers = filterHeaders(response.headers());
       const contentType = headers["content-type"];
       const msg = {
         type: "RESPONSE",
@@ -85,7 +91,7 @@ let recordingStarted = false;
   
   await injectContentScript(page, handleMessage);
 
-  await page.goto("https://forms.office.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbR0oaxTShh7lDuDtmCzJnyRZURU44Q1k3UFZWTlJLMDYyQUo4TFdJOVEzUC4u&light=1");
+  await page.goto(startPage);
   
   // page.on("console", msg => {
   //   for (let i = 0; i < msg.args().length; ++i)
@@ -112,7 +118,7 @@ function handleMessage(msg) {
       startRecord();
       break;
     case "EXPORT":
-      saveRecords("Case 0", {
+      saveRecords(caseName, {
         REDUX_ACTIONS,
         DOM_MUTATIONS,
         USER_EVENTS,
@@ -128,7 +134,9 @@ function handleMessage(msg) {
       recordingStarted && REDUX_ACTIONS.push(msg);
       break;
     case "RESPONSE":
-      recordingStarted && RESPONSES.push(msg);
+      if (recordingStarted) {
+        RESPONSES.push(msg);
+      }
       break;
     case "REQUEST":
       recordingStarted && REQUESTS.push(msg);
@@ -144,11 +152,13 @@ async function handleHttpMessage(page, msg) {
 }
 
 function startRecord() {
+  console.log("*********************************************************************");
   console.log("\nStart recording...");
+  console.log("*********************************************************************");
   REDUX_ACTIONS.length = 0;
   DOM_MUTATIONS.length = 0;
   USER_EVENTS.length = 0;
   REQUESTS.length = 0;
   RESPONSES.length = 0;
-  recordingStarted = true;
+  recordingStarted = false;
 }

@@ -41,7 +41,7 @@ const minimizeReduxState = actionMsgs => {
         // delete message1.state;
     }
     //actionMsgs[0].message.delta = actionMsgs[0].message.state;
-    generateStateDelta(actionMsgs[0].message, {state: {}}, false);
+    actionMsgs[0] && generateStateDelta(actionMsgs[0].message, {state: {}}, false);
     //delete actionMsgs[0].message.state;
 
     return actionMsgs;

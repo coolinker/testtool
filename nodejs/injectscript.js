@@ -1,6 +1,6 @@
 const injectContentScript = async (page, messageHandler) => {
     await page.exposeFunction("onFttMessage", messageHandler);
-    await page.exposeFunction("node_getTime", () => Date.now());
+    await page.exposeFunction("node_getTime", () => Date.now() + 1);
     await page.evaluateOnNewDocument(() => {
       const observer = new MutationObserver(async (list, options) => {
         const time = await window.node_getTime();
@@ -21,7 +21,7 @@ const injectContentScript = async (page, messageHandler) => {
             type,
             attributeName,
             oldValue,
-            target: nodeToJson(target),
+            target: getXPathForElement(target),
             addedNodes: Array.from(addedNodes).map(n => nodeToJson(n)),
             removedNodes: Array.from(removedNodes).map(n => nodeToJson(n)),
           };
@@ -31,6 +31,24 @@ const injectContentScript = async (page, messageHandler) => {
         return node.outerHTML;
       };
       
+      function getXPathForElement(element) {
+        const idx = (sib, name) => sib 
+            ? idx(sib.previousElementSibling, name||sib.localName) + (sib.localName == name)
+            : 1;
+        const segs = elm => !elm || elm.nodeType !== 1 
+            ? ['']
+            : elm.id && document.getElementById(elm.id) === elm
+                ? [`id("${elm.id}")`]
+                : [...segs(elm.parentNode), `${elm.localName.toLowerCase()}[${idx(elm)}]`];
+        return segs(element).join('/');
+      }
+      
+      function getElementByXPath(path) { 
+          return (new XPathEvaluator()) 
+              .evaluate(path, document.documentElement, null, 
+                              XPathResult.FIRST_ORDERED_NODE_TYPE, null) 
+              .singleNodeValue; 
+      } 
       const config = { 
         attributes: true, 
         childList: true, 

@@ -2,14 +2,15 @@ const hash = require('object-hash');
 const colors = require('colors/safe');
 const { exit } = require('process');
 const Diff = require('diff');
-const util = require('util')
+const util = require('util');
 
 const puppeteer = require("puppeteer-core");
 const injectContentScript = require("./injectscript");
 const loadCase = require("./loadcase");
 const { requestToObj, generateStateDelta, jsondiffpatchFilter, deltaConsole, regexTest,
-  removeArrayElement, shiftArrayByHash, responseToObj } = require("./utils");
+  removeArrayElement, shiftArrayByHash, removeElementByHash, responseToObj } = require("./utils");
 const { domMutationXPathOnly, domMutationSummary, currentDomMutationGroup } = require("./domutils");
+let configs = require('./configs');
 
 process.on('unhandledRejection', error => {
   // Will print "unhandledRejection err is not defined"
@@ -29,21 +30,6 @@ let RESPONSES = [];
 let REQUESTS = [];
 const pendingRequests = {};
 
-let configs = {
-  caseName: "Case0",
-  online: true,
-  assert: (desc, a0, a1) => {},
-  requestMatcher: (delta, target, source) => false,
-  // matchRequestAndResponse: (reqUrl, respUrl) => false,
-  domMutationMatcher: (delta, target, source) => false,
-  reduxActionMatcher: (delta, target, source) => false,
-  
-  noiseUrlRegex: [/^https?:\/\/([a-zA-Z\d-]+\.){0,}com\/c\.gif/,
-    /^https?:\/\/([a-zA-Z\d-]+\.){0,}net\/forms\/images\/favicon\.ico/,
-    /^https?:\/\/browser\.pipe\.aria\.microsoft\.com/,
-    /^https?:\/\/web\.vortex\.data\.microsoft\.com/,
-  ],
-}
 let _finishResolver;
 let browser;
 let page;
@@ -80,7 +66,11 @@ async function run(cfg = {}) {
   const firstPageRequest = REQUESTS[0];
   const pageUrl = firstPageRequest.message.url;
   await page.setRequestInterception(true);
+  if (configs.online) {
+    await interceptResponse(page);
+  }
   await page.setCacheEnabled(false);
+
   handleHttpTraffic(page);
   await injectContentScript(page, handleMessage);
 
@@ -100,6 +90,28 @@ async function run(cfg = {}) {
   return prm;
 }
 
+async function interceptResponse(page) {
+  const client = await page.target().createCDPSession();
+  await client.send("Fetch.enable", {
+    patterns:[
+      // { 
+      //   urlPattern: "https://forms.office.com/*",
+      //   requestStage: "Request"}, 
+      { 
+        urlPattern: "*",
+        requestStage: "Response"}],
+    });
+  
+  client.on("Fetch.requestPaused", async ({ requestId, request }) => {
+    console.log(`Intercepted ${request.url}`);
+    const responseCdp = await client.send("Fetch.getResponseBody", { requestId });
+    console.log(`************************Response body for ${requestId} is ${responseCdp.body.length} bytes`);
+
+    await client.send("Fetch.continueRequest", { requestId });
+  });
+
+}
+
 function handleHttpTraffic(page) {
   page.on('request', (request) => {    
     try{
@@ -108,9 +120,8 @@ function handleHttpTraffic(page) {
         const req = getMatchRequest(request);
         const { hash: hashstr } = req || {};
         if(req) {
-          console.log(colors.green("Match request"), hashstr, request.url());
+          console.log(colors.green("Match request"), hashstr, request.url().substring(0, 200));
           putRequestPendingQueue(hashstr, request);
-          //request.continue();
           if (configs.online) {
             request.continue();
           }
@@ -138,19 +149,28 @@ function handleHttpTraffic(page) {
   });
 
   page.on('response', async (response) => {
-    console.log("-----------------response done", Date.now(), response.request().url());
-    if (configs.online) {
-      const respObj = responseToObj(response);
+    try{
+      const filter = regexTest(response.request().url(), configs.noiseUrlRegex);
+      if (filter) {
+        console.log("-----------------response done", Date.now(), response.request().url());
+        if (configs.online) {
+          const respObj = await responseToObj(response, configs.ignoreHeaders);
+          
+          await handleResponseJob(respObj, false);
+        }
+      }
+    } catch (e) {
+      console.log(e)
     }
+    
   });
 }
-
 
 let _rescheduleTimeout;
 let _jobCancelled = false;
 
 function resetJobTimer(inerval) {
-  const jobInterval = configs.online ? 500 : 20;
+  const jobInterval = 20;
   if (_jobCancelled) {
     return;
   }
@@ -186,9 +206,11 @@ async function doNextJob() {
   switch (type) {
     case "RESPONSE":
       if (!configs.online) {
-        await handleResponseJob(job);
+        await handleResponseJob(job, true);
+        resetJobTimer();
+      } else {
+        resetJobTimer(500);
       }
-      resetJobTimer();
       break;
     case "REQUEST":
       //console.log("--------------------------------doNextJob REQUEST")
@@ -206,10 +228,11 @@ function matchResponseWithPendingRequest(response) {
   if (reqs) {
     return reqs;
   }
+  console.log(response.hash)
 
   console.log("hash:", hash, pendingRequests)
 
-  //exit();
+  exit();
   // const pendingQueues = reqObject.values(pendingRequests);
   // for (let i = 0; i < pendingQueues.length; i++){
   //   const queue = pendingQueues[i];
@@ -219,17 +242,6 @@ function matchResponseWithPendingRequest(response) {
   // }
 
   return null;
-}
-
-function handleResponseAtTime(time) {
-  for (let i = 0; i < RESPONSES.length; i++) {
-    if (RESPONSES[i].time === time) {
-      handleResponseJob(RESPONSES[i]);
-      i--;
-    } else {
-      break;
-    }
-  }
 }
 
 async function handleUserEventJob(userEvent) {
@@ -248,16 +260,22 @@ async function handleUserEventJob(userEvent) {
   }
 }
 
-async function handleResponseJob(response) {
+async function handleResponseJob(response, withRespond = true) {
   const reqs = matchResponseWithPendingRequest(response);
   
   if (reqs) {
     const hash = response.hash;
     const resp = getResponseByHash(hash);
-    console.log(colors.green("Handle Response Job"), Date.now(), hash, resp.url);
+
+    console.log(colors.green("Handle Response Job"), Date.now(), hash, resp?.url, reqs[0]?.url());
+    if (!resp) exit();
     //console.log(colors.gray(resp.body.substring && resp.body.substring(0, 200)));
     const req = reqs.shift();
-    await req.respond(resp);
+
+    if (withRespond) {
+      await req.respond(resp);
+    }
+
     if (reqs.length === 0) {
       delete pendingRequests[hash];
     }
@@ -288,15 +306,17 @@ function getNextJob() {
     time: s.time,
     type: s.type,
   })))
+  
+  printLeftJobs();
+  return sortable[0];
+}
+function printLeftJobs() {
   console.log(colors.grey("RESPONSES " + RESPONSES[0]?.time + RESPONSES[0]?.message.url.substring(0, 200)));
   console.log(colors.grey("REQUESTS " +  REQUESTS[0]?.time + REQUESTS[0]?.message.url.substring(0, 200)));
   console.log(colors.grey("DOM_MUTATIONS " +  DOM_MUTATIONS[0]?.time));
   console.log(colors.grey("REDUX_ACTIONS " +  REDUX_ACTIONS[0]?.time));
   console.log(colors.grey("USER_EVENTS " +  USER_EVENTS[0]?.time));
-  
-  return sortable[0];
 }
-
 
 function removeRequestResponesOfUrl(url, arr) {
   for(let i = 0; i < arr.length; i++) {
@@ -309,7 +329,7 @@ function removeRequestResponesOfUrl(url, arr) {
 }
 
 function getMatchRequest(request) {
-  const reqObj = requestToObj(request);
+  const reqObj = requestToObj(request, configs.ignoreHeaders);
   const hashstr = hash(reqObj);
   
   const req = shiftArrayByHash(hashstr, REQUESTS);
@@ -327,12 +347,15 @@ function getMatchRequest(request) {
     if (!delta || configs.requestMatcher(delta, target, REQUESTS[0])) {
       return REQUESTS.shift();
     }
+
+    printLeftJobs()
   }
   //exit();
 }
 
 function getResponseByHash(hashstr) {
-  const resp = shiftArrayByHash(hashstr, RESPONSES)?.message;
+  //const resp = shiftArrayByHash(hashstr, RESPONSES)?.message;
+  const resp = removeElementByHash(hashstr, RESPONSES)?.message;
 
   if (resp?.contentType?.indexOf("image") >= 0) {
     resp.body = Buffer.from(resp.body, "base64");
@@ -374,7 +397,7 @@ function consumeReduxAction(msg) {
     } else {
       console.log(colors.red("consumeReduxAction Error:"), source.type, source.time);
       deltaConsole.log(delta);
-      //exit();
+      exit();
       //configs.assert(testDesc, actionMsg, source.message);
       //cancelJob();
     }

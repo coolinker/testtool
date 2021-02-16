@@ -4,17 +4,10 @@ const colors = require('colors/safe');
 
 const injectContentScript = require("./injectscript");
 const saveRecords = require("./saverecord");
-const { requestToObj, responseToObj, regexTest, findMessageByHash } = require("./utils");
+const { requestToObj, responseToObj, regexTest, findElementByHash } = require("./utils");
+const configs = require('./configs');
 
 var myArgs = process.argv.slice(2);
-
-const configs = {
-  noiseUrlRegex: [/^https?:\/\/([a-zA-Z\d-]+\.){0,}com\/c\.gif/,
-    /^https?:\/\/([a-zA-Z\d-]+\.){0,}net\/forms\/images\/favicon\.ico/,
-    /^https?:\/\/browser\.pipe\.aria\.microsoft\.com/,
-    /^https?:\/\/web\.vortex\.data\.microsoft\.com/,
-  ],
-};
 
 const REDUX_ACTIONS = [];
 const DOM_MUTATIONS = [];
@@ -55,13 +48,14 @@ let page_cdp;
 
     if (regexTest(url, configs.noiseUrlRegex)) {
       console.log(colors.red("recordingStarted"), recordingStarted, request.url(), request.headers())
+      const reqObj = requestToObj(request, configs.ignoreHeaders);
       const msg = {
         type: "REQUEST",
         source: "ftt_node",
-        message: requestToObj(request),
+        message: reqObj,
         time: Date.now()
       };
-      const hashstr = hash(requestToObj(request));
+      const hashstr = hash(reqObj);
       httpMap[hashstr] = request;
       msg.hash = hashstr;
       handleHttpMessage(page, msg);
@@ -73,7 +67,7 @@ let page_cdp;
   page.on('response', async (response) => {
     const url = response.request().url();
     if (regexTest(url, configs.noiseUrlRegex)) {
-      const msg = await responseToObj(response);
+      const msg = await responseToObj(response, configs.ignoreHeaders);
       handleHttpMessage(page, msg);
     }
   });
@@ -164,7 +158,7 @@ function adjustRequestResponseTime(ori, cur) {
     const time = REQUESTS[i].time;
     if (time > ori) {
       REQUESTS[i].time += cur - ori;
-      const resp = findMessageByHash(REQUESTS[i].hash, RESPONSES);
+      const resp = findElementByHash(REQUESTS[i].hash, RESPONSES);
       console.log("*******************", time, ori, REQUESTS[i].message.url, cur-ori, !!resp)
       if (resp) {
         resp.time += cur - ori;

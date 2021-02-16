@@ -17,6 +17,7 @@ const requestDeltaToIgnore = {
 const reduxDeltaToIgnore = {
   action: {
     payload: {
+      rowCount: 0,
       $width: 0,
       $responseId: 0,
   }

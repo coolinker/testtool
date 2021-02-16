@@ -1,31 +1,33 @@
 const colors = require('colors/safe');
-
+const hash = require('object-hash');
 const deltaConsole = require('jsondiffpatch').console;
 const jsondiffpatch = require('jsondiffpatch').create();
 const jsondiffpatchFilter = require('jsondiffpatch').create({
     // propertyFilter: jsonDiffPropertyFilter
   });
 
-function requestToObj(request) {
+function requestToObj(request, headerKeys) {
     const headers = request.headers();
     const contentType = headers["content-type"];
     const method = request.method();
     const data = request.postData();
     const postData = data && method === "POST" && contentType === "application/json" 
         ? JSON.parse(data) : data
-    return {
-        headers: filterHeaders(headers),
+    const re = {
+        headers: filterHeaders(headers, headerKeys),
         postData,
         method,
         url: request.url(),
     }
+    return re;
 }
   
-async function responseToObj(response) {
+async function responseToObj(response, headerKeys) {
     const url = response.request().url();
     const status = response.status();
     const responseTime = Date.now();
-    const headers = filterHeaders(response.headers());
+    const hashStr = hash(requestToObj(response.request(), headerKeys))
+    const headers = filterHeaders(response.headers(), headerKeys);
     const contentType = headers["content-type"];
     const msg = {
       type: "RESPONSE",
@@ -37,40 +39,39 @@ async function responseToObj(response) {
         body: await getResponseBody(response),
         url,
       },
-      hash: hash(requestToObj(response.request())), // requestHash(response.request()),
+      hash: hashStr, // requestHash(response.request()),
       time: responseTime,
     };
-  
     return msg;
 }
 
-function filterHeaders(headers) {
+function filterHeaders(headers, ignoreKeys) {
     const contentType = headers["content-type"];
     if (contentType?.indexOf("image") > -1) {
         return {"content-type": contentType};
     } else {
-        delete headers["user-agent"];
+        //delete headers["user-agent"];
+        ignoreKeys.forEach(k => delete headers[k]);
+        return headers;
     }
-
-    return headers;
 }
 
 async function getResponseBody(response) {
     const headers = response.headers();
     const status = response.status();
+
     if (status === 302) return "";
 
     const contentType = headers["content-type"];
+
     if (contentType?.indexOf("image") > -1) {
         return (await response.buffer()).toString('base64');
     }
-
     const txt = await response.text();
     if (txt == "") {
-        console.log("response.request()", response.request().url());
-        const base64 = (await response.buffer()).toString('base64');
-        console.log(base64);
+        console.log("**************response.request()", response.request().url());
     }
+
     return txt;
 }
 
@@ -119,7 +120,7 @@ function regexTest(str, regs) {
     return arr.filter(b => b).length === 0;
 }
 
-function findMessageByHash(hashstr, arr) {
+function findElementByHash(hashstr, arr) {
     for(let i = arr.length -1; i >= 0; i--) {
         const msg = arr[i];
         if (msg.hash === hashstr) {
@@ -136,6 +137,15 @@ function shiftArrayByHash(hashstr, arr) {
     }
   }
   
+function removeElementByHash(hash, arr) {
+    for(let i = 0; i < arr.length; i++) {
+        const msg = arr[i];
+        if (msg.hash === hash) {
+            return arr.splice(i, 1)[0];
+        }
+    }
+}
+
 function removeArrayElement(ele, arr) {
     for(let i = 0; i < arr.length; i++) {
         const msg = arr[i];
@@ -189,9 +199,10 @@ module.exports = {
     filterHeaders,
     regexTest,
     shiftArrayByHash,
+    removeElementByHash,
     removeArrayElement,
     firstMessageAfterTime,
-    findMessageByHash,
+    findElementByHash,
     hasAdditionalKeys,
     responseToObj,
 };

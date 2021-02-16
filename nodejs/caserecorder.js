@@ -4,9 +4,18 @@ const colors = require('colors/safe');
 
 const injectContentScript = require("./injectscript");
 const saveRecords = require("./saverecord");
-const { requestToObj, getResponseBody, filterHeaders } = require("./utils");
+const { requestToObj, responseToObj, regexTest, findMessageByHash } = require("./utils");
 
-const officeUrlRegex = /^https?:\/\/([a-zA-Z\d-]+\.){0,}office\./;
+var myArgs = process.argv.slice(2);
+
+const configs = {
+  noiseUrlRegex: [/^https?:\/\/([a-zA-Z\d-]+\.){0,}com\/c\.gif/,
+    /^https?:\/\/([a-zA-Z\d-]+\.){0,}net\/forms\/images\/favicon\.ico/,
+    /^https?:\/\/browser\.pipe\.aria\.microsoft\.com/,
+    /^https?:\/\/web\.vortex\.data\.microsoft\.com/,
+  ],
+};
+
 const REDUX_ACTIONS = [];
 const DOM_MUTATIONS = [];
 const USER_EVENTS = [];
@@ -14,10 +23,11 @@ const RESPONSES = [];
 const REQUESTS = [];
 
 const httpMap = {};
-const caseName = "Case1";
-const startPage = "https://forms.office.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbR0oaxTShh7lDuDtmCzJnyRZUNlU3R044MlQ4SDlWV0FWNlNOQ09ISDdOTi4u&light=1";
+const caseName = myArgs[0] || "Case1";
+const startPage = "https://forms.office.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbR0oaxTShh7lDuDtmCzJnyRZUOTBYOFNKNzBYN1JWNktSQ0VSOTg1NVhJVy4u";
 let recordingStarted = false;
-
+let page;
+let page_cdp;
 (async () => {
   
   const browser = await puppeteer.launch({
@@ -33,7 +43,8 @@ let recordingStarted = false;
   //const context = await browser.createIncognitoBrowserContext();
   //const page = await context.newPage();
   
-  const page = await browser.newPage();
+  page = await browser.newPage();
+  page_cdp = await page.target().createCDPSession();
   await page.setRequestInterception(true);
 
   page.on('request', (request) => {
@@ -42,7 +53,7 @@ let recordingStarted = false;
       recordingStarted = true;
     }
 
-    if (true || officeUrlRegex.test(url)) {
+    if (regexTest(url, configs.noiseUrlRegex)) {
       console.log(colors.red("recordingStarted"), recordingStarted, request.url(), request.headers())
       const msg = {
         type: "REQUEST",
@@ -61,24 +72,8 @@ let recordingStarted = false;
 
   page.on('response', async (response) => {
     const url = response.request().url();
-    const status = response.status();
-    const responseTime = Date.now();
-    if (true || officeUrlRegex.test(url)) {
-      const headers = filterHeaders(response.headers());
-      const contentType = headers["content-type"];
-      const msg = {
-        type: "RESPONSE",
-        source: "ftt_node",
-        message: {
-          headers,
-          status,
-          contentType,
-          body: await getResponseBody(response),
-          url,
-        },
-        hash: hash(requestToObj(response.request())), // requestHash(response.request()),
-        time: responseTime,
-      };
+    if (regexTest(url, configs.noiseUrlRegex)) {
+      const msg = await responseToObj(response);
       handleHttpMessage(page, msg);
     }
   });
@@ -110,13 +105,13 @@ function requestHash(request) {
   }
 }
 
-function handleMessage(msg) {
-  console.log("handleMessage:", msg.time, msg.type, msg.source, msg.message?.action?.type, msg?.hash, msg.message?.url);
+async function  handleMessage(msg) {
+  console.log("handleMessage:", msg.time, msg.type, msg.source,  msg.message?.type, msg.message?.action?.type, msg?.hash, msg.message?.url);
 
   switch(msg.type) {
     case "RECORD":
       startRecord();
-      break;
+      return;
     case "EXPORT":
       saveRecords(caseName, {
         REDUX_ACTIONS,
@@ -125,30 +120,96 @@ function handleMessage(msg) {
         RESPONSES,
         REQUESTS,
       })
+      return;
+  }
+  
+  // if (!filterMessage(msg)) {
+  //   return;
+  // }
+  const oriTime = msg.time;
+  const nodeMsg = convertToNodeMessage(msg);
+  const curTime = nodeMsg.time;
+  if (oriTime !== curTime) {
+    //adjustRequestResponseTime(oriTime, curTime);
+    //console.log("****************************************", msg.type, oriTime - curTime)
+  }
+  switch(msg.type) {
+    case "USER_EVENT":
+      if (recordingStarted) {
+        USER_EVENTS.push(nodeMsg);
+      }
       break;
     case "DOM_MUTATION":
-      msg.hash = hash(msg.message);
-      recordingStarted && DOM_MUTATIONS.push(msg);
+      recordingStarted && DOM_MUTATIONS.push(nodeMsg);
       break;
     case "REDUX_ACTION":
-      recordingStarted && REDUX_ACTIONS.push(msg);
+      recordingStarted && REDUX_ACTIONS.push(nodeMsg);
       break;
     case "RESPONSE":
       if (recordingStarted) {
-        RESPONSES.push(msg);
+        RESPONSES.push(nodeMsg);
       }
       break;
     case "REQUEST":
-      recordingStarted && REQUESTS.push(msg);
+      recordingStarted && REQUESTS.push(nodeMsg);
       break;
   }
 
+  postNodeMessage(nodeMsg);
 }
 
-async function handleHttpMessage(page, msg) {
+function adjustRequestResponseTime(ori, cur) {
+  
+  for (let i = REQUESTS.length - 1; i >= 0; i--) {
+    const time = REQUESTS[i].time;
+    if (time > ori) {
+      REQUESTS[i].time += cur - ori;
+      const resp = findMessageByHash(REQUESTS[i].hash, RESPONSES);
+      console.log("*******************", time, ori, REQUESTS[i].message.url, cur-ori, !!resp)
+      if (resp) {
+        resp.time += cur - ori;
+      }
+    } else {
+      break;
+    }
+  }
+}
+
+// function filterMessage(msg) {
+//   switch (msg.type) {
+//     case "RESPONSE":
+//     case "REQUEST":
+//       return configs.filterRequestAndResponseByUrl(msg.message.url);
+//     default: return true;
+//   }
+
+// }
+
+function convertToNodeMessage(msg) {
+  // const { message: {type: eventType, currentTarget: xpath}} = msg;
+  // const expression = `document.evaluate('${xpath}', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`;
+  // const {result} = await page_cdp.send('Runtime.evaluate', {expression});
+  // const {listeners} = await page_cdp.send('DOMDebugger.getEventListeners', {objectId: result.objectId})
+  // console.log("***************handleRawUserEvent", eventType, xpath, listeners.length, listeners[0]);
+  if (msg.source === "ftt_node") {
+    return msg;
+  }
+
+  return {
+    ...msg,
+    source: "ftt_node",
+    time: msg.type === "USER_EVENT" ? msg.time : Date.now(),
+  };
+}
+
+function postNodeMessage(msg) {
+  page.evaluate((msg) => window.postMessage(msg), msg);
+}
+
+function handleHttpMessage(page, msg) {
     handleMessage(msg);
     //recordingStarted && console.log("handleMessage:", msg.time, msg.type, msg.source, msg.message.url);
-    page.evaluate((msg) => window.postMessage(msg), msg);
+    //page.evaluate((msg) => window.postMessage(msg), msg);
 }
 
 function startRecord() {

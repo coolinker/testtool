@@ -11,7 +11,12 @@ window.addEventListener('message', function(event) {
     return;
   }
 
-  if (message.source === "ftt_page" || message.source === "ftt_node") {
+  if (message.source === "ftt_node" && (
+    message.type === "REDUX_ACTION"
+    || message.type === "USER_EVENT"
+    || message.type === "REQUEST"
+    || message.type === "RESPONSE"
+    || message.type === "DOM_MUTATION")) {
     _sendMessage(message);
   }
 });
@@ -76,7 +81,6 @@ window.addEventListener('message', function(event) {
 
 
 function _sendMessage(msg) {
-  console.log("_sendMessge", _port, msg);
   getPort().postMessage(msg);
 };
 

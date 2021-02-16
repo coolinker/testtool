@@ -1,11 +1,10 @@
 const injectContentScript = async (page, messageHandler) => {
     await page.exposeFunction("onFttMessage", messageHandler);
-    await page.exposeFunction("node_getTime", () => Date.now() + 1);
     await page.evaluateOnNewDocument(() => {
       const observer = new MutationObserver(async (list, options) => {
-        const time = await window.node_getTime();
+        const time = Date.now();
         postMessage({
-            source: "ftt_node",
+            source: "ftt_inject",
             type: "DOM_MUTATION",
             message: {
               domMutation: mutationRecordsToJson(list),
@@ -28,27 +27,27 @@ const injectContentScript = async (page, messageHandler) => {
         })
       };
       function nodeToJson(node, depth = 1) {
-        return node.outerHTML;
+        return {
+          [getXPathForElement(node)]: node.outerHTML,
+        }
       };
       
+      function getElementByXpath(path) {
+        return document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+      }
+
       function getXPathForElement(element) {
         const idx = (sib, name) => sib 
             ? idx(sib.previousElementSibling, name||sib.localName) + (sib.localName == name)
             : 1;
         const segs = elm => !elm || elm.nodeType !== 1 
             ? ['']
-            : elm.id && document.getElementById(elm.id) === elm
-                ? [`id("${elm.id}")`]
+            : false && elm.id && document.getElementById(elm.id) === elm
+                ? [`//*[@id='${elm.id}']`] //[`id("${elm.id}")`]
                 : [...segs(elm.parentNode), `${elm.localName.toLowerCase()}[${idx(elm)}]`];
         return segs(element).join('/');
       }
-      
-      function getElementByXPath(path) { 
-          return (new XPathEvaluator()) 
-              .evaluate(path, document.documentElement, null, 
-                              XPathResult.FIRST_ORDERED_NODE_TYPE, null) 
-              .singleNodeValue; 
-      } 
+
       const config = { 
         attributes: true, 
         childList: true, 
@@ -61,27 +60,49 @@ const injectContentScript = async (page, messageHandler) => {
       observer.observe(document, config);
       
       async function sendUserEvent(e) {
+        const time = Date.now();
         postMessage({
-          source: "ftt_node",
+          source: "ftt_inject",
           type: "USER_EVENT",
           message: {
               type:e.type,
+              payload: {
+                key: e.key,
+                shiftKey: e.shiftKey,
+              },
+              target: getXPathForElement(e.target),
           },
-          time: await window.node_getTime(),
+          time,
         });
       };
-      document.addEventListener("mousedown", (e) => {
+      // document.addEventListener("mousedown", (e) => {
+      //   sendUserEvent(e);
+      // },  { capture: true });
+      
+      // document.addEventListener("mouseup", (e) => {
+      //   sendUserEvent(e);
+      // },  { capture: true });
+
+      document.addEventListener("click", (e) => {
         sendUserEvent(e);
       },  { capture: true });
-    
+
+      // document.addEventListener("keydown", (e) => {
+      //   sendUserEvent(e);
+      // },  { capture: true });
+
+      // document.addEventListener("keyup", (e) => {
+      //   sendUserEvent(e);
+      // },  { capture: true });
+
       document.addEventListener("keydown", (e) => {
         sendUserEvent(e);
       },  { capture: true });
 
       window.addEventListener("message", async (e) => {
         const msg = e.data;
-        if (msg?.type !== "REQUEST" && msg?.type !== "RESPONSE") {
-          onFttMessage(msg);
+        if (msg?.source !== "ftt_node") {
+          await onFttMessage(msg);
         }
       });
     });

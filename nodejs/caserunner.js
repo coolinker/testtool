@@ -2,11 +2,19 @@ const hash = require('object-hash');
 const colors = require('colors/safe');
 const { exit } = require('process');
 const Diff = require('diff');
+const util = require('util')
 
 const puppeteer = require("puppeteer-core");
 const injectContentScript = require("./injectscript");
 const loadCase = require("./loadcase");
-const { requestToObj, generateStateDelta, jsondiffpatchFilter, deltaConsole, domMutationSummary } = require("./utils");
+const { requestToObj, generateStateDelta, jsondiffpatchFilter, deltaConsole, regexTest,
+  removeArrayElement, shiftArrayByHash, responseToObj } = require("./utils");
+const { domMutationXPathOnly, domMutationSummary, currentDomMutationGroup } = require("./domutils");
+
+process.on('unhandledRejection', error => {
+  // Will print "unhandledRejection err is not defined"
+  console.log('unhandledRejection', error.message);
+});
 
 const  CheckPoint = {
   Key: 0,
@@ -23,29 +31,39 @@ const pendingRequests = {};
 
 let configs = {
   caseName: "Case0",
+  online: true,
   assert: (desc, a0, a1) => {},
-  requestFilter: (url) => true,
-  matchRequest: (req0, req1) => false,
+  requestMatcher: (delta, target, source) => false,
   // matchRequestAndResponse: (reqUrl, respUrl) => false,
-  domMutationFilter: (dm0, dm1) => false,
-  reduxActionDeltaFilter: (a0, a1) => false,
+  domMutationMatcher: (delta, target, source) => false,
+  reduxActionMatcher: (delta, target, source) => false,
+  
+  noiseUrlRegex: [/^https?:\/\/([a-zA-Z\d-]+\.){0,}com\/c\.gif/,
+    /^https?:\/\/([a-zA-Z\d-]+\.){0,}net\/forms\/images\/favicon\.ico/,
+    /^https?:\/\/browser\.pipe\.aria\.microsoft\.com/,
+    /^https?:\/\/web\.vortex\.data\.microsoft\.com/,
+  ],
 }
 let _finishResolver;
 let browser;
+let page;
 async function run(cfg = {}) {
   configs = {
     ...configs,
     ...cfg,
   };
   const { caseName } = configs;
+  const prm = new Promise((rel, rej) => {
+    _finishResolver = rel;
+  });
+
   browser = await puppeteer.launch({
     defaultViewport: null,
     headless: false, 
     executablePath: "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
     args:["--proxy-server=http://127.0.0.1:8888",
       "--load-extension=C:/gitprj/testtool/devtool",
-      "--start-maximized",
-      "--offline"],
+      "--start-maximized"],
     ignoreDefaultArgs: ["--disable-extensions","--enable-automation"],
   });
 
@@ -58,7 +76,7 @@ async function run(cfg = {}) {
   REQUESTS = jsonObj.REQUESTS;
   //fixPrefetchResponses(RESPONSES);
 
-  const page = await browser.newPage();
+  page = await browser.newPage();
   const firstPageRequest = REQUESTS[0];
   const pageUrl = firstPageRequest.message.url;
   await page.setRequestInterception(true);
@@ -79,46 +97,37 @@ async function run(cfg = {}) {
   // })}, 1);
   
   //await browser.close();
-  return new Promise((rel, rej) => {
-    _finishResolver = rel;
-  })
+  return prm;
 }
 
 function handleHttpTraffic(page) {
   page.on('request', (request) => {    
     try{
-      const filter = configs.requestFilter(request.url());
+      const filter = regexTest(request.url(), configs.noiseUrlRegex);
       if (filter) {
         const req = getMatchRequest(request);
         const { hash: hashstr } = req || {};
         if(req) {
           console.log(colors.green("Match request"), hashstr, request.url());
-          
-          //if(hashstr === "07a0009fccfef9a2f02e35fa8c1cbd446b8df97a") console.log("===========", hashstr, response.body.length);
-          //pendingRequests[hashstr] = request;
-  
           putRequestPendingQueue(hashstr, request);
-  
-          //const response = getResponseByHash(hashstr);
-          //request.respond(response);
-          //   console.log("response", hashstr);
-          //  setTimeout(() => {
-          //     console.log("----------", request.url())
-          //     request.respond(response);
-          //     console.log("----------")
-          //  }, count * 1000);
-          // count++;
-          // })(request, response);
-  
-          
+          //request.continue();
+          if (configs.online) {
+            request.continue();
+          }
         } else {
-          console.log(colors.red("page.on:" + hashstr), request.url());
-          console.log(request.headers())
-          request.continue();
+          console.log(colors.red("Match request failure:" + hashstr), request.url());
+          console.log(REQUESTS[0]);
+          exit();
           //request.abort();
         }
       } else {
-        request.continue();
+        //request.abort();
+        request.respond({
+          status: 200,
+          body: "",
+        });
+        console.log(colors.gray("ignored page:"+request.url()))
+        // request.continue();
       }
       
     } catch (e) {
@@ -129,15 +138,19 @@ function handleHttpTraffic(page) {
   });
 
   page.on('response', async (response) => {
-    console.log("-----------------response done", response.request().url());
+    console.log("-----------------response done", Date.now(), response.request().url());
+    if (configs.online) {
+      const respObj = responseToObj(response);
+    }
   });
 }
 
 
 let _rescheduleTimeout;
 let _jobCancelled = false;
-const jobInterval = 20;
+
 function resetJobTimer(inerval) {
+  const jobInterval = configs.online ? 500 : 20;
   if (_jobCancelled) {
     return;
   }
@@ -161,22 +174,28 @@ function cancelJob() {
   _jobCancelled = true;
 }
 
-function doNextJob() {
+async function doNextJob() {
   const job = getNextJob(); 
   if (!job) {
     _finishResolver();
     console.log("doNextJob==============================exit")
-    browser.close();
+    await browser.close();
     return;
   }
   const type = job.type; 
   switch (type) {
     case "RESPONSE":
-      handleResponseJob(job);
-      resetJobTimer(job.nextInterval);
+      if (!configs.online) {
+        await handleResponseJob(job);
+      }
+      resetJobTimer();
       break;
     case "REQUEST":
-      //resetJobTimer();
+      //console.log("--------------------------------doNextJob REQUEST")
+      //resetJobTimer(3000);
+      break;
+    case "USER_EVENT":
+      await handleUserEventJob(job);
       break;
   }
 }
@@ -190,7 +209,7 @@ function matchResponseWithPendingRequest(response) {
 
   console.log("hash:", hash, pendingRequests)
 
-  exit();
+  //exit();
   // const pendingQueues = reqObject.values(pendingRequests);
   // for (let i = 0; i < pendingQueues.length; i++){
   //   const queue = pendingQueues[i];
@@ -202,15 +221,43 @@ function matchResponseWithPendingRequest(response) {
   return null;
 }
 
-function handleResponseJob(response) {
-  const hash = response.hash;
+function handleResponseAtTime(time) {
+  for (let i = 0; i < RESPONSES.length; i++) {
+    if (RESPONSES[i].time === time) {
+      handleResponseJob(RESPONSES[i]);
+      i--;
+    } else {
+      break;
+    }
+  }
+}
+
+async function handleUserEventJob(userEvent) {
+  const { message: {type, target, payload: { key }}} = userEvent;
+  removeArrayElement(userEvent, USER_EVENTS);
+  const hrefElement = await page.$x(target);
+  console.log(colors.blue("handleUserEventJob"), target);
+  switch (type) {
+    case "click":
+      await hrefElement[0]?.click();
+      break;
+    case "keydown":
+      await hrefElement[0]?.type(key);
+      break;
+    default: ;
+  }
+}
+
+async function handleResponseJob(response) {
   const reqs = matchResponseWithPendingRequest(response);
+  
   if (reqs) {
+    const hash = response.hash;
     const resp = getResponseByHash(hash);
-    console.log(colors.green("Handle Response Job"), hash, resp.url);
-    console.log(colors.gray(resp.body.substring && resp.body.substring(0, 200)));
+    console.log(colors.green("Handle Response Job"), Date.now(), hash, resp.url);
+    //console.log(colors.gray(resp.body.substring && resp.body.substring(0, 200)));
     const req = reqs.shift();
-    req.respond(resp);
+    await req.respond(resp);
     if (reqs.length === 0) {
       delete pendingRequests[hash];
     }
@@ -241,8 +288,8 @@ function getNextJob() {
     time: s.time,
     type: s.type,
   })))
-  console.log(colors.grey("RESPONSES " + RESPONSES[0]?.time + RESPONSES[0]?.message.url));
-  console.log(colors.grey("REQUESTS " +  REQUESTS[0]?.time + REQUESTS[0]?.message.url));
+  console.log(colors.grey("RESPONSES " + RESPONSES[0]?.time + RESPONSES[0]?.message.url.substring(0, 200)));
+  console.log(colors.grey("REQUESTS " +  REQUESTS[0]?.time + REQUESTS[0]?.message.url.substring(0, 200)));
   console.log(colors.grey("DOM_MUTATIONS " +  DOM_MUTATIONS[0]?.time));
   console.log(colors.grey("REDUX_ACTIONS " +  REDUX_ACTIONS[0]?.time));
   console.log(colors.grey("USER_EVENTS " +  USER_EVENTS[0]?.time));
@@ -250,31 +297,42 @@ function getNextJob() {
   return sortable[0];
 }
 
-function pullArrayElementByHash(hashstr, arr) {
-  //for(let i = 0; i < arr.length; i++) {
-    const msg = arr[0];
-    if (msg.hash === hashstr) {
-      const tgt = arr.splice(0, 1);
-      return tgt[0];
+
+function removeRequestResponesOfUrl(url, arr) {
+  for(let i = 0; i < arr.length; i++) {
+    const msg = arr[i].message;
+    if (msg.url === url) {
+      arr.splice(i, 1);
+      break;
     }
-  //}
+  }
 }
 
 function getMatchRequest(request) {
   const reqObj = requestToObj(request);
   const hashstr = hash(reqObj);
-  const req =  pullArrayElementByHash(hashstr, REQUESTS);
+  
+  const req = shiftArrayByHash(hashstr, REQUESTS);
   // console.log("getMatchRequest", hashstr, req);
   if (req) {
     return req;
-  } else if (configs.matchRequest(reqObj, REQUESTS[0].message)) {
-    return REQUESTS.shift();
+  } else {
+    const target = { 
+      message: reqObj,
+      type: "REQUEST",
+      source: "ftt_node",
+    };
+    const delta = jsondiffpatchFilter.diff(REQUESTS[0], target);
+    console.log("******************getMatchRequest:", delta)
+    if (!delta || configs.requestMatcher(delta, target, REQUESTS[0])) {
+      return REQUESTS.shift();
+    }
   }
   //exit();
 }
 
 function getResponseByHash(hashstr) {
-  const resp = pullArrayElementByHash(hashstr, RESPONSES)?.message;
+  const resp = shiftArrayByHash(hashstr, RESPONSES)?.message;
 
   if (resp?.contentType?.indexOf("image") >= 0) {
     resp.body = Buffer.from(resp.body, "base64");
@@ -283,7 +341,7 @@ function getResponseByHash(hashstr) {
   return resp;
 }
 
-function handleMessage(msg) {
+async function handleMessage(msg) {
   console.log("received Message:", msg.time, msg.type, msg.source, msg.message?.action?.type, msg?.hash, msg.message?.url);
   switch(msg.type) {
     case "DOM_MUTATION":
@@ -310,48 +368,64 @@ function consumeReduxAction(msg) {
     generateStateDelta(actionMsg, {state: latestSate});
     const delta = jsondiffpatchFilter.diff(actionMsg, source.message);
     const testDesc = `Redux Action: ${actionMsg.action.type}`;
-    if (!delta || configs.reduxActionDeltaFilter(delta)) {
+    if (!delta || configs.reduxActionMatcher(delta, msg, source)) {
       REDUX_ACTIONS.shift();
       configs.assert(testDesc);
     } else {
       console.log(colors.red("consumeReduxAction Error:"), source.type, source.time);
       deltaConsole.log(delta);
-      exit();
-      configs.assert(testDesc, actionMsg, source.message);
-      cancelJob();
+      //exit();
+      //configs.assert(testDesc, actionMsg, source.message);
+      //cancelJob();
     }
     
     latestSate = source.message.delta ? jsondiffpatchFilter.patch(latestSate, source.message.delta) : latestSate;
+    return source;
   } catch(e) {
     console.log(colors.red("consumeReduxAction ERROR:"), e);
   }
 }
 
 function consumeDomMutation(msg) {
-  const mutationMsg = msg.message;
   try {
-    const source = DOM_MUTATIONS[0];
-    const delta = source.checkPoint === CheckPoint.MatchAny
-      ? undefined
-      : jsondiffpatchFilter.diff(mutationMsg, source.message);
-    const testDesc = `DOM Mutation: ${source.hash}`;
+    const mutationMsg = msg.message;
+    const group = currentDomMutationGroup(DOM_MUTATIONS, RESPONSES, REDUX_ACTIONS, USER_EVENTS);
     
-    if (!delta) {
-      DOM_MUTATIONS.shift();
-      console.log(colors.green("Match DomMutation:"), source.time);
-      configs.assert(testDesc);
-    } else {
-      console.log(colors.red("Match DomMutation Failure:"), source.time)
-      console.log(domMutationSummary(source.message.domMutation));
-      //console.log("-------------------------------------------------------------------------------", delta);
-      console.log(colors.red(domMutationSummary(mutationMsg.domMutation)));
-      //DOM_MUTATIONS.shift();
-      //logDomStringDiff(domMutationSummary(source.message.domMutation)[12].target, domMutationSummary(mutationMsg.domMutation)[12].target)
-      //deltaConsole.log(delta);
-      //exit();   
-      configs.assert(testDesc, mutationMsg, source.message);
-      //cancelJob();
+    if (group.length === 0) {
+      return;
     }
+    let testDesc = `DOM Mutation: ${msg?.hash}`;
+    for (let i = 0; i < group.length; i++) {
+      const source = group[i];
+      const { checkPoint } = source;
+      const delta = jsondiffpatchFilter.diff(
+        checkPoint === CheckPoint.Key ? mutationMsg : domMutationXPathOnly(mutationMsg),
+        checkPoint === CheckPoint.Key ? source?.message : domMutationXPathOnly(source?.message)
+        );
+      testDesc = `DOM Mutation: ${source?.hash}`;
+      
+      if (!delta || configs.domMutationMatcher(delta, msg, source)) {
+        removeArrayElement(source, DOM_MUTATIONS);
+        console.log(colors.green("Match DomMutation:"), source.time);
+        configs.assert(testDesc);
+        return;
+      }
+    }
+
+    console.log(colors.red("Match DomMutation Failure:"), group[0].time)
+    console.log(domMutationSummary(group[0].message.domMutation));
+    //console.log("-------------------------------------------------------------------------------", delta);
+    //console.log(colors.red(domMutationSummary(mutationMsg.domMutation)));
+    console.log(util.inspect(mutationMsg.domMutation, {showHidden: false, depth: null}))
+
+    //DOM_MUTATIONS.shift();
+    //logDomStringDiff(domMutationSummary(source.message.domMutation)[12].target, domMutationSummary(mutationMsg.domMutation)[12].target)
+    //deltaConsole.log(delta);
+    //exit();   
+    configs.assert(testDesc, mutationMsg, group[0].message);
+    //cancelJob();
+  
+    
   } catch (e) {
     console.log("consumeDomMutation error", e)
   }
@@ -374,7 +448,6 @@ function logDomStringDiff(dom1, dom2) {
     //process.stderr.write(part.value[color]);
   });
 
-  console.log();
 }
 
 

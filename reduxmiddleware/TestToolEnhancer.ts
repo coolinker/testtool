@@ -18,14 +18,19 @@ export const testToolEnhancer = (next: any) => (
       //   return state;
       // }
       const newState = reducer(state, action);
+      const time = Date.now() ;
+      const newAction = {
+        ...action,
+        payload: (action as any).payload instanceof MouseEvent ? undefined : (action as any).payload,
+      };
       window.postMessage({
         source: "ftt_page",
         type: "REDUX_ACTION",
         message: {
-            action,
+            action: newAction,
             state: newState,
         },
-        time: Date.now(),
+        time,
       }, "*");
 
       return newState;
@@ -48,7 +53,7 @@ window.addEventListener("message", (event: any) => {
   }
 
   if (message.type === "FTT_REDUX_ACTION_PLAY") {
-    const { action } = message;
+    const action = message.action;
     store.dispatch(action);
     
     //console.log("FTT_REDUX_ACTION_PLAY action", action);

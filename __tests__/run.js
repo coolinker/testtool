@@ -7,7 +7,10 @@ const myArgs = process.argv.slice(2);
 
 const requestDeltaToIgnore = {
   message: {
-    headers: { "x-correlationid": ""},
+    headers: {
+      "x-correlationid": "",
+      referer: "",
+    },
     postData: { startDate: "", submitDate: "" }
   },
   time: 0,
@@ -36,6 +39,7 @@ const reduxDeltaToIgnore = {
 (async () => {
   await run({
     caseName: myArgs[0] || "Case1",
+    online: myArgs[1] === "online",
     assert: (desc, v0, v1) => {
     },
     domMutationMatcher: (delta, target, { time, message: {domMutation}}) => {

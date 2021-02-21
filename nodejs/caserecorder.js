@@ -4,7 +4,8 @@ const colors = require('colors/safe');
 
 const injectContentScript = require("./injectscript");
 const saveRecords = require("./saverecord");
-const { requestToObj, responseToObj, regexTest, findElementByHash } = require("./utils");
+const { regexTest, findElementByHash } = require("./utils");
+const { requestToObj, responseToObj, interceptResponse } = require("./casecommon");
 const configs = require('./configs');
 
 var myArgs = process.argv.slice(2);
@@ -17,10 +18,8 @@ const REQUESTS = [];
 
 const httpMap = {};
 const caseName = myArgs[0] || "Case1";
-const startPage = "https://forms.office.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbR0oaxTShh7lDuDtmCzJnyRZUOTBYOFNKNzBYN1JWNktSQ0VSOTg1NVhJVy4u";
-let recordingStarted = false;
+const startPage = "https://forms.office.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbR0oaxTShh7lDuDtmCzJnyRZUOTBYOFNKNzBYN1JWNktSQ0VSOTg1NVhJVy4u&light=1";
 let page;
-let page_cdp;
 (async () => {
   
   const browser = await puppeteer.launch({
@@ -37,17 +36,15 @@ let page_cdp;
   //const page = await context.newPage();
   
   page = await browser.newPage();
-  page_cdp = await page.target().createCDPSession();
+  //page_cdp = await page.target().createCDPSession();
+  //await interceptResponse(page);
   await page.setRequestInterception(true);
 
   page.on('request', (request) => {
     const url = request.url();
-    if (url === startPage) {
-      recordingStarted = true;
-    }
-
+    
     if (regexTest(url, configs.noiseUrlRegex)) {
-      console.log(colors.red("recordingStarted"), recordingStarted, request.url(), request.headers())
+      console.log(colors.blue("Request sent:"), request.url());
       const reqObj = requestToObj(request, configs.ignoreHeaders);
       const msg = {
         type: "REQUEST",
@@ -90,17 +87,12 @@ let page_cdp;
   //await browser.close();
 })();
 
-function requestHash(request) {
-  for (const [key, value] of Object.entries(httpMap)) {
-    
-    if (value === request) {
-      return key;
-    }
-  }
-}
-
 async function  handleMessage(msg) {
   console.log("handleMessage:", msg.time, msg.type, msg.source,  msg.message?.type, msg.message?.action?.type, msg?.hash, msg.message?.url);
+  if (configs.isNoise(msg)) {
+    console.log(colors.yellow("Noise Message:"), msg.time, msg.type, msg.source, msg.message?.action?.type, msg?.hash, msg.message?.url);
+    return;
+  }
 
   switch(msg.type) {
     case "RECORD":
@@ -129,23 +121,19 @@ async function  handleMessage(msg) {
   }
   switch(msg.type) {
     case "USER_EVENT":
-      if (recordingStarted) {
-        USER_EVENTS.push(nodeMsg);
-      }
+      USER_EVENTS.push(nodeMsg);
       break;
     case "DOM_MUTATION":
-      recordingStarted && DOM_MUTATIONS.push(nodeMsg);
+      DOM_MUTATIONS.push(nodeMsg);
       break;
     case "REDUX_ACTION":
-      recordingStarted && REDUX_ACTIONS.push(nodeMsg);
+      REDUX_ACTIONS.push(nodeMsg);
       break;
     case "RESPONSE":
-      if (recordingStarted) {
-        RESPONSES.push(nodeMsg);
-      }
+      RESPONSES.push(nodeMsg);
       break;
     case "REQUEST":
-      recordingStarted && REQUESTS.push(nodeMsg);
+      REQUESTS.push(nodeMsg);
       break;
   }
 
@@ -159,7 +147,6 @@ function adjustRequestResponseTime(ori, cur) {
     if (time > ori) {
       REQUESTS[i].time += cur - ori;
       const resp = findElementByHash(REQUESTS[i].hash, RESPONSES);
-      console.log("*******************", time, ori, REQUESTS[i].message.url, cur-ori, !!resp)
       if (resp) {
         resp.time += cur - ori;
       }
@@ -168,16 +155,6 @@ function adjustRequestResponseTime(ori, cur) {
     }
   }
 }
-
-// function filterMessage(msg) {
-//   switch (msg.type) {
-//     case "RESPONSE":
-//     case "REQUEST":
-//       return configs.filterRequestAndResponseByUrl(msg.message.url);
-//     default: return true;
-//   }
-
-// }
 
 function convertToNodeMessage(msg) {
   // const { message: {type: eventType, currentTarget: xpath}} = msg;
@@ -202,8 +179,6 @@ function postNodeMessage(msg) {
 
 function handleHttpMessage(page, msg) {
     handleMessage(msg);
-    //recordingStarted && console.log("handleMessage:", msg.time, msg.type, msg.source, msg.message.url);
-    //page.evaluate((msg) => window.postMessage(msg), msg);
 }
 
 function startRecord() {
@@ -215,5 +190,4 @@ function startRecord() {
   USER_EVENTS.length = 0;
   REQUESTS.length = 0;
   RESPONSES.length = 0;
-  recordingStarted = false;
 }

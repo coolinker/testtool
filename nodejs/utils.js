@@ -1,79 +1,9 @@
 const colors = require('colors/safe');
-const hash = require('object-hash');
 const deltaConsole = require('jsondiffpatch').console;
 const jsondiffpatch = require('jsondiffpatch').create();
 const jsondiffpatchFilter = require('jsondiffpatch').create({
     // propertyFilter: jsonDiffPropertyFilter
   });
-
-function requestToObj(request, headerKeys) {
-    const headers = request.headers();
-    const contentType = headers["content-type"];
-    const method = request.method();
-    const data = request.postData();
-    const postData = data && method === "POST" && contentType === "application/json" 
-        ? JSON.parse(data) : data
-    const re = {
-        headers: filterHeaders(headers, headerKeys),
-        postData,
-        method,
-        url: request.url(),
-    }
-    return re;
-}
-  
-async function responseToObj(response, headerKeys) {
-    const url = response.request().url();
-    const status = response.status();
-    const responseTime = Date.now();
-    const hashStr = hash(requestToObj(response.request(), headerKeys))
-    const headers = filterHeaders(response.headers(), headerKeys);
-    const contentType = headers["content-type"];
-    const msg = {
-      type: "RESPONSE",
-      source: "ftt_node",
-      message: {
-        headers,
-        status,
-        contentType,
-        body: await getResponseBody(response),
-        url,
-      },
-      hash: hashStr, // requestHash(response.request()),
-      time: responseTime,
-    };
-    return msg;
-}
-
-function filterHeaders(headers, ignoreKeys) {
-    const contentType = headers["content-type"];
-    if (contentType?.indexOf("image") > -1) {
-        return {"content-type": contentType};
-    } else {
-        //delete headers["user-agent"];
-        ignoreKeys.forEach(k => delete headers[k]);
-        return headers;
-    }
-}
-
-async function getResponseBody(response) {
-    const headers = response.headers();
-    const status = response.status();
-
-    if (status === 302) return "";
-
-    const contentType = headers["content-type"];
-
-    if (contentType?.indexOf("image") > -1) {
-        return (await response.buffer()).toString('base64');
-    }
-    const txt = await response.text();
-    if (txt == "") {
-        console.log("**************response.request()", response.request().url());
-    }
-
-    return txt;
-}
 
 function generateStateDelta(target, source, useFilter = true) {
     const jdp = useFilter ? jsondiffpatchFilter : jsondiffpatch;
@@ -156,7 +86,7 @@ function removeArrayElement(ele, arr) {
     }
 }
 
-  function firstMessageAfterTime(arr, time) {
+  function firstElementAfterTime(arr, time) {
     for(let i = 0; i < arr.length; i++) {
       const mtime = arr[i].time;
       if (mtime > time) {
@@ -191,18 +121,14 @@ function hasAdditionalKeys(deltaObj, keyTemplate) {
 }
 
 module.exports = {
-    requestToObj,
-    getResponseBody,
     generateStateDelta,
     deltaConsole,
     jsondiffpatchFilter,
-    filterHeaders,
     regexTest,
     shiftArrayByHash,
     removeElementByHash,
     removeArrayElement,
-    firstMessageAfterTime,
+    firstElementAfterTime,
     findElementByHash,
     hasAdditionalKeys,
-    responseToObj,
 };

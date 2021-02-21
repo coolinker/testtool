@@ -1,15 +1,17 @@
 const hash = require('object-hash');
 const colors = require('colors/safe');
-const { exit } = require('process');
+const { exit, config } = require('process');
 const Diff = require('diff');
 const util = require('util');
 
 const puppeteer = require("puppeteer-core");
 const injectContentScript = require("./injectscript");
 const loadCase = require("./loadcase");
-const { requestToObj, generateStateDelta, jsondiffpatchFilter, deltaConsole, regexTest,
-  removeArrayElement, shiftArrayByHash, removeElementByHash, responseToObj } = require("./utils");
-const { domMutationXPathOnly, domMutationSummary, currentDomMutationGroup } = require("./domutils");
+const { generateStateDelta, jsondiffpatchFilter, deltaConsole, regexTest,
+  removeArrayElement, shiftArrayByHash, removeElementByHash } = require("./utils");
+const { toResponseObj, requestToObj, responseToObj, interceptResponse, debuggerPause,
+  domMutationXPathOnly, domMutationSummary, currentMessageGroup } = require("./casecommon");
+
 let configs = require('./configs');
 
 process.on('unhandledRejection', error => {
@@ -29,10 +31,12 @@ let USER_EVENTS = [];
 let RESPONSES = [];
 let REQUESTS = [];
 const pendingRequests = {};
+const responseQueue = [];
 
 let _finishResolver;
 let browser;
 let page;
+let client;
 async function run(cfg = {}) {
   configs = {
     ...configs,
@@ -60,18 +64,19 @@ async function run(cfg = {}) {
   USER_EVENTS = jsonObj.USER_EVENTS;
   RESPONSES = jsonObj.RESPONSES;
   REQUESTS = jsonObj.REQUESTS;
-  //fixPrefetchResponses(RESPONSES);
 
   page = await browser.newPage();
   const firstPageRequest = REQUESTS[0];
   const pageUrl = firstPageRequest.message.url;
   await page.setRequestInterception(true);
   if (configs.online) {
-    await interceptResponse(page);
+    await interceptResponse(page, handleOnResponse);
   }
   await page.setCacheEnabled(false);
 
   handleHttpTraffic(page);
+  await enableDebuggerPause(page);
+
   await injectContentScript(page, handleMessage);
 
   await page.goto(pageUrl);
@@ -90,28 +95,6 @@ async function run(cfg = {}) {
   return prm;
 }
 
-async function interceptResponse(page) {
-  const client = await page.target().createCDPSession();
-  await client.send("Fetch.enable", {
-    patterns:[
-      // { 
-      //   urlPattern: "https://forms.office.com/*",
-      //   requestStage: "Request"}, 
-      { 
-        urlPattern: "*",
-        requestStage: "Response"}],
-    });
-  
-  client.on("Fetch.requestPaused", async ({ requestId, request }) => {
-    console.log(`Intercepted ${request.url}`);
-    const responseCdp = await client.send("Fetch.getResponseBody", { requestId });
-    console.log(`************************Response body for ${requestId} is ${responseCdp.body.length} bytes`);
-
-    await client.send("Fetch.continueRequest", { requestId });
-  });
-
-}
-
 function handleHttpTraffic(page) {
   page.on('request', (request) => {    
     try{
@@ -125,6 +108,7 @@ function handleHttpTraffic(page) {
           if (configs.online) {
             request.continue();
           }
+
         } else {
           console.log(colors.red("Match request failure:" + hashstr), request.url());
           console.log(REQUESTS[0]);
@@ -155,7 +139,7 @@ function handleHttpTraffic(page) {
         console.log("-----------------response done", Date.now(), response.request().url());
         if (configs.online) {
           const respObj = await responseToObj(response, configs.ignoreHeaders);
-          
+
           await handleResponseJob(respObj, false);
         }
       }
@@ -165,6 +149,71 @@ function handleHttpTraffic(page) {
     
   });
 }
+
+async function interceptResponse(page) {
+  const client = await page.target().createCDPSession();
+  await client.send("Fetch.enable", {
+    patterns:[
+      // { 
+      //   urlPattern: "https://forms.office.com/*",
+      //   requestStage: "Request"}, 
+      { 
+        urlPattern: "*",
+        requestStage: "Response"}],
+    });
+  
+  client.on("Fetch.requestPaused", async ({ requestId, request, resourceType, responseStatusCode, responseHeaders }) => {
+    const responseCdp = await client.send("Fetch.getResponseBody", { requestId });
+    console.log(`************************Response body for ${request.url} is ${responseCdp.body.length} bytes. ${responseCdp.base64Encoded}`);
+    // page.waitForTimeout(10000)
+    //   .then(() => console.log('Waited a second!'));
+    //console.log({responseStatusCode, resourceType, responseHeaders})
+    
+    //await client.send("Fetch.fulfillRequest", { requestId, responseCode: responseStatusCode, responseHeaders, body: responseCdp.body });
+    const respObj = toResponseObj({request, responseStatusCode, resourceType, responseHeaders, body: responseCdp.body})
+    responseQueue.push({
+      fulfill: { requestId, responseCode: responseStatusCode, responseHeaders, body: responseCdp.body },
+      message: respObj,
+    });
+    
+  });
+
+}
+async function handleOnResponse(responseObj) {
+  console.log("###############handleOnResponse, resume!!!!!!!!!!!", responseObj?.message.url);
+  await client.send("Debugger.resume");
+}
+
+async function enableDebuggerPause(page) {
+  client = await page.target().createCDPSession();
+  await client.send("Debugger.enable");
+  //await client.send("Debugger.pause");
+  client.on("Debugger.paused", async () => {
+    console.log("****************Debugger.paused");
+    // const job = getNextJob(); 
+    // if (job.type !== "RESPONSE") {
+    //   console.log("****************Debugger.resume");
+    //   await client.send("Debugger.resume");
+    //   setTimeout(async () => {
+    //     await client.send("Debugger.pause");
+    //   }, 0)
+      
+    // }
+  })
+  
+}
+
+async function tryPauseOnResponseJob() {
+    const job = getNextJob(); 
+    if (job.type === "RESPONSE") {
+      console.log("****************Debugger.pause!!!!!!!!!!!!!");
+      await client.send("Debugger.pause");
+    } else {
+      console.log("****************Debugger.resume!!!!!!!!!!!!!");
+      await client.send("Debugger.resume");
+    }
+}
+
 
 let _rescheduleTimeout;
 let _jobCancelled = false;
@@ -262,7 +311,6 @@ async function handleUserEventJob(userEvent) {
 
 async function handleResponseJob(response, withRespond = true) {
   const reqs = matchResponseWithPendingRequest(response);
-  
   if (reqs) {
     const hash = response.hash;
     const resp = getResponseByHash(hash);
@@ -282,6 +330,8 @@ async function handleResponseJob(response, withRespond = true) {
   } else {
     console.log(colors.red("requrest not found"), hash, response.message.url);
   }
+
+  //tryPauseOnResponseJob();
 }
 
 function putRequestPendingQueue(hashstr, request) {
@@ -318,21 +368,16 @@ function printLeftJobs() {
   console.log(colors.grey("USER_EVENTS " +  USER_EVENTS[0]?.time));
 }
 
-function removeRequestResponesOfUrl(url, arr) {
-  for(let i = 0; i < arr.length; i++) {
-    const msg = arr[i].message;
-    if (msg.url === url) {
-      arr.splice(i, 1);
-      break;
-    }
-  }
-}
-
 function getMatchRequest(request) {
   const reqObj = requestToObj(request, configs.ignoreHeaders);
   const hashstr = hash(reqObj);
   
-  const req = shiftArrayByHash(hashstr, REQUESTS);
+  const group = currentMessageGroup(REQUESTS, DOM_MUTATIONS, RESPONSES, REDUX_ACTIONS, USER_EVENTS);
+  
+  let req;
+  if (group.find((msg => msg.hash === hashstr))) {
+    req = removeElementByHash(hashstr, REQUESTS);
+  } 
   // console.log("getMatchRequest", hashstr, req);
   if (req) {
     return req;
@@ -343,7 +388,7 @@ function getMatchRequest(request) {
       source: "ftt_node",
     };
     const delta = jsondiffpatchFilter.diff(REQUESTS[0], target);
-    console.log("******************getMatchRequest:", delta)
+    console.log("getMatchRequest delta:", request.url(), delta)
     if (!delta || configs.requestMatcher(delta, target, REQUESTS[0])) {
       return REQUESTS.shift();
     }
@@ -366,6 +411,11 @@ function getResponseByHash(hashstr) {
 
 async function handleMessage(msg) {
   console.log("received Message:", msg.time, msg.type, msg.source, msg.message?.action?.type, msg?.hash, msg.message?.url);
+  if (configs.isNoise(msg)) {
+    console.log(colors.yellow("Noise Message:"), msg.time, msg.type, msg.source, msg.message?.action?.type, msg?.hash, msg.message?.url);
+    return;
+  }
+
   switch(msg.type) {
     case "DOM_MUTATION":
       consumeDomMutation(msg);
@@ -380,8 +430,11 @@ async function handleMessage(msg) {
     case "REQUEST":
       break;
   }
-}
 
+  // if (configs.online) {
+  //   await tryPauseOnResponseJob();
+  // }
+}
 
 let latestSate = {};
 function consumeReduxAction(msg) {
@@ -412,8 +465,7 @@ function consumeReduxAction(msg) {
 function consumeDomMutation(msg) {
   try {
     const mutationMsg = msg.message;
-    const group = currentDomMutationGroup(DOM_MUTATIONS, RESPONSES, REDUX_ACTIONS, USER_EVENTS);
-    
+    const group = currentMessageGroup(DOM_MUTATIONS, RESPONSES, REDUX_ACTIONS, USER_EVENTS);
     if (group.length === 0) {
       return;
     }
@@ -444,7 +496,7 @@ function consumeDomMutation(msg) {
     //DOM_MUTATIONS.shift();
     //logDomStringDiff(domMutationSummary(source.message.domMutation)[12].target, domMutationSummary(mutationMsg.domMutation)[12].target)
     //deltaConsole.log(delta);
-    //exit();   
+    exit();   
     configs.assert(testDesc, mutationMsg, group[0].message);
     //cancelJob();
   
